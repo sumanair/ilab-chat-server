@@ -1,0 +1,8 @@
+# Ignore SQLite database file
+chat.db
+
+# Ignore virtual environment directory
+venv/
+
+# Ignore Python bytecode cache directory
+__pycache__/
