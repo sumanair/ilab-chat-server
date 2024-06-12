@@ -3,6 +3,7 @@ from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
 import os
+import logging
 
 # Load configuration
 import config
@@ -13,10 +14,15 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = config.SQLALCHEMY_TRACK_MODIFICAT
 CORS(app)
 db = SQLAlchemy(app)
 
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
 external_api_url = config.EXTERNAL_API_ENDPOINT
 
 class ChatSession(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(100), nullable=True)
     valid = db.Column(db.Boolean, default=False)
     messages = db.relationship('Message', backref='session', lazy=True)
 
@@ -40,7 +46,7 @@ def health_check():
             external_api_status = 'healthy'
         else:
             external_api_status = 'unhealthy'
-    except requests.RequestException as e:
+    except requests.RequestException:
         external_api_status = 'unhealthy'
 
     return jsonify({'status': 'healthy', 'external_api_status': external_api_status}), 200
@@ -48,7 +54,7 @@ def health_check():
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
     sessions = ChatSession.query.filter_by(valid=True).all()
-    return jsonify([{'id': session.id} for session in sessions])
+    return jsonify([{'id': session.id, 'name': session.name} for session in sessions])
 
 @app.route('/api/new_chat', methods=['POST'])
 def new_chat():
@@ -70,8 +76,29 @@ def end_chat():
 
 @app.route('/api/load_chat/<int:session_id>', methods=['GET'])
 def load_chat(session_id):
+    global current_session_id
+    current_session_id = session_id
     messages = Message.query.filter_by(session_id=session_id).all()
     return jsonify([{'role': m.role, 'content': m.content} for m in messages])
+
+@app.route('/api/update_session_name', methods=['POST'])
+def update_session_name():
+    session_id = request.json.get('session_id')
+    new_name = request.json.get('new_name')
+    if not session_id or new_name is None:
+        return jsonify({'error': 'Session ID and new name are required'}), 400
+    try:
+        session = ChatSession.query.get(session_id)
+        if session:
+            session.name = new_name
+            db.session.commit()
+            return '', 204
+        else:
+            return jsonify({'error': 'Session not found'}), 404
+    except Exception as e:
+        logger.exception("Error during update_session_name")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -103,17 +130,28 @@ def chat():
 @app.route('/api/reset', methods=['POST'])
 def reset():
     global current_session_id
-    db_path = os.path.join(config.basedir, "chat.db")
-    if os.path.exists(db_path):
-        os.remove(db_path)
-        print("Deleted chat.db")
-    else:
-        print("chat.db does not exist.")
-    with app.app_context():
-        db.create_all()
-        print("Recreated database and tables")
-    current_session_id = None
-    return '', 204
+    try:
+        db.session.query(Message).delete()
+        db.session.query(ChatSession).filter(ChatSession.id != current_session_id).delete()
+        db.session.commit()
+        return '', 204
+    except Exception as e:
+        logger.exception("Error during reset")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/delete_sessions', methods=['POST'])
+def delete_sessions():
+    session_ids = request.json.get('ids', [])
+    try:
+        ChatSession.query.filter(ChatSession.id.in_(session_ids)).delete(synchronize_session=False)
+        Message.query.filter(Message.session_id.in_(session_ids)).delete(synchronize_session=False)
+        db.session.commit()
+        return '', 204
+    except Exception as e:
+        logger.exception("Error during delete_sessions")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 def run_ilab_chat(message):
     try:
@@ -132,6 +170,7 @@ def run_ilab_chat(message):
         response.raise_for_status()
         return response
     except requests.RequestException as e:
+        logger.exception("Error during run_ilab_chat")
         return jsonify({'error': str(e)})
 
 if __name__ == '__main__':
