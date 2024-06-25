@@ -11,7 +11,10 @@ import config
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = config.SQLALCHEMY_DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = config.SQLALCHEMY_TRACK_MODIFICATIONS
-CORS(app)
+
+# Allow CORS from your React frontend
+CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
+
 db = SQLAlchemy(app)
 
 # Set up logging
@@ -22,8 +25,8 @@ external_api_url = config.EXTERNAL_API_ENDPOINT
 
 class ChatSession(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=True)
     valid = db.Column(db.Boolean, default=False)
+    name = db.Column(db.String(100), nullable=True)
     messages = db.relationship('Message', backref='session', lazy=True)
 
 class Message(db.Model):
@@ -81,25 +84,6 @@ def load_chat(session_id):
     messages = Message.query.filter_by(session_id=session_id).all()
     return jsonify([{'role': m.role, 'content': m.content} for m in messages])
 
-@app.route('/api/update_session_name', methods=['POST'])
-def update_session_name():
-    session_id = request.json.get('session_id')
-    new_name = request.json.get('new_name')
-    if not session_id or new_name is None:
-        return jsonify({'error': 'Session ID and new name are required'}), 400
-    try:
-        session = ChatSession.query.get(session_id)
-        if session:
-            session.name = new_name
-            db.session.commit()
-            return '', 204
-        else:
-            return jsonify({'error': 'Session not found'}), 404
-    except Exception as e:
-        logger.exception("Error during update_session_name")
-        db.session.rollback()
-        return jsonify({'error': str(e)}), 500
-
 @app.route('/api/chat', methods=['POST'])
 def chat():
     global current_session_id
@@ -130,14 +114,20 @@ def chat():
 @app.route('/api/reset', methods=['POST'])
 def reset():
     global current_session_id
+    db_path = os.path.join(config.basedir, "chat.db")
     try:
-        db.session.query(Message).delete()
-        db.session.query(ChatSession).filter(ChatSession.id != current_session_id).delete()
-        db.session.commit()
+        if os.path.exists(db_path):
+            os.remove(db_path)
+            print("Deleted chat.db")
+        else:
+            print("chat.db does not exist.")
+        with app.app_context():
+            db.create_all()
+            print("Recreated database and tables")
+        current_session_id = None
         return '', 204
     except Exception as e:
         logger.exception("Error during reset")
-        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/delete_sessions', methods=['POST'])
@@ -150,6 +140,23 @@ def delete_sessions():
         return '', 204
     except Exception as e:
         logger.exception("Error during delete_sessions")
+        db.session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/update_session_name', methods=['POST'])
+def update_session_name():
+    session_id = request.json.get('session_id')
+    new_name = request.json.get('new_name')
+    try:
+        session = ChatSession.query.get(session_id)
+        if session:
+            session.name = new_name
+            db.session.commit()
+            return '', 204
+        else:
+            return jsonify({'error': 'Session not found'}), 404
+    except Exception as e:
+        logger.exception("Error during update_session_name")
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
