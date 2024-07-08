@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
 import requests
 import os
@@ -7,15 +6,21 @@ import logging
 
 # Load configuration
 import config
+from chathistory import db, ChatSession, Message, Folder, initialize_db
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = config.SQLALCHEMY_DATABASE_URI
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = config.SQLALCHEMY_TRACK_MODIFICATIONS
 
-# Allow CORS from your React frontend
-CORS(app, resources={r"/*": {"origins": "http://localhost:3000"}})
+# Allow CORS from React frontend
+CORS(app, resources={r"/*": {"origins": config.CORS_ORIGINS}}, supports_credentials=True)
 
-db = SQLAlchemy(app)
+@app.after_request
+def after_request(response):
+    response.headers['Access-Control-Allow-Origin'] = config.CORS_ORIGINS[0]
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
+    return response
 
 # Set up logging
 logging.basicConfig(level=logging.DEBUG)
@@ -23,21 +28,8 @@ logger = logging.getLogger(__name__)
 
 external_api_url = config.EXTERNAL_API_ENDPOINT
 
-class ChatSession(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    valid = db.Column(db.Boolean, default=False)
-    name = db.Column(db.String(100), nullable=True)
-    messages = db.relationship('Message', backref='session', lazy=True)
-
-class Message(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    role = db.Column(db.String(10), nullable=False)
-    content = db.Column(db.Text, nullable=False)
-    session_id = db.Column(db.Integer, db.ForeignKey('chat_session.id'), nullable=False)
-
-# Ensure the database and tables are created within the application context
-with app.app_context():
-    db.create_all()
+# Initialize the database
+initialize_db(app)
 
 current_session_id = None
 
@@ -54,15 +46,91 @@ def health_check():
 
     return jsonify({'status': 'healthy', 'external_api_status': external_api_status}), 200
 
+@app.route('/api/folders', methods=['GET'])
+def get_folders():
+    folders = Folder.query.all()
+    return jsonify([{'id': folder.id, 'name': folder.name} for folder in folders])
+
+@app.route('/api/folders', methods=['POST'])
+def create_folder():
+    folder_name = request.json.get('name')
+    if not folder_name:
+        return jsonify({'error': 'Folder name is required'}), 400
+    new_folder = Folder(name=folder_name)
+    db.session.add(new_folder)
+    db.session.commit()
+    return jsonify({'id': new_folder.id, 'name': new_folder.name}), 201
+
+@app.route('/api/folders/<int:folder_id>', methods=['PUT'])
+def update_folder(folder_id):
+    new_name = request.json.get('name')
+    if not new_name:
+        return jsonify({'error': 'Folder name is required'}), 400
+    folder = Folder.query.get(folder_id)
+    if not folder:
+        return jsonify({'error': 'Folder not found'}), 404
+    folder.name = new_name
+    db.session.commit()
+    return jsonify({'id': folder.id, 'name': folder.name}), 200
+
+@app.route('/api/folders/<int:folder_id>', methods=['DELETE'])
+def delete_folder(folder_id):
+    folder = Folder.query.get(folder_id)
+    if not folder:
+        return jsonify({'error': 'Folder not found'}), 404
+    db.session.delete(folder)
+    db.session.commit()
+    return '', 204
+
+@app.route('/api/folders/<int:folder_id>/delete_with_contents', methods=['DELETE'])
+def delete_folder_with_contents(folder_id):
+    folder = Folder.query.get(folder_id)
+    if not folder:
+        return jsonify({'error': 'Folder not found'}), 404
+
+    try:
+        sessions = ChatSession.query.filter_by(folder_id=folder_id).all()
+        for session in sessions:
+            messages = Message.query.filter_by(session_id=session.id).all()
+            for message in messages:
+                db.session.delete(message)
+            db.session.delete(session)
+        
+        db.session.delete(folder)
+        db.session.commit()
+        return '', 204
+    except Exception as e:
+        db.session.rollback()
+        logger.exception("Error during delete_folder_with_contents")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/sessions', methods=['GET'])
 def get_sessions():
-    sessions = ChatSession.query.filter_by(valid=True).all()
-    return jsonify([{'id': session.id, 'name': session.name} for session in sessions])
+    folder_id = request.args.get('folder_id')
+    if folder_id:
+        sessions = ChatSession.query.filter_by(valid=True, folder_id=folder_id).all()
+    else:
+        sessions = ChatSession.query.filter_by(valid=True, folder_id=None).all()
+    return jsonify([{'id': session.id, 'name': session.name, 'folder_id': session.folder_id} for session in sessions])
+
+@app.route('/api/sessions/<int:session_id>/move', methods=['POST'])
+def move_session(session_id):
+    folder_id = request.json.get('folder_id')
+    session = ChatSession.query.get(session_id)
+    if not session:
+        return jsonify({'error': 'Session not found'}), 404
+    if folder_id is not None:
+        session.folder_id = folder_id
+    else:
+        session.folder_id = None
+    db.session.commit()
+    return '', 204
 
 @app.route('/api/new_chat', methods=['POST'])
 def new_chat():
     global current_session_id
-    new_session = ChatSession()
+    folder_id = request.json.get('folder_id')
+    new_session = ChatSession(folder_id=folder_id)
     db.session.add(new_session)
     db.session.commit()
     current_session_id = new_session.id
@@ -114,33 +182,37 @@ def chat():
 @app.route('/api/reset', methods=['POST'])
 def reset():
     global current_session_id
-    db_path = os.path.join(config.basedir, "chat.db")
     try:
-        if os.path.exists(db_path):
-            os.remove(db_path)
-            print("Deleted chat.db")
-        else:
-            print("chat.db does not exist.")
         with app.app_context():
-            db.create_all()
-            print("Recreated database and tables")
+            # Delete all records from all tables
+            db.session.query(Message).delete()
+            db.session.query(ChatSession).delete()
+            db.session.query(Folder).delete()
+            db.session.commit()
+            print("Deleted all contents from the database")
         current_session_id = None
         return '', 204
     except Exception as e:
         logger.exception("Error during reset")
+        db.session.rollback()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/delete_sessions', methods=['POST'])
 def delete_sessions():
     session_ids = request.json.get('ids', [])
     try:
-        ChatSession.query.filter(ChatSession.id.in_(session_ids)).delete(synchronize_session=False)
-        Message.query.filter(Message.session_id.in_(session_ids)).delete(synchronize_session=False)
+        for session_id in session_ids:
+            session = ChatSession.query.get(session_id)
+            if session:
+                messages = Message.query.filter_by(session_id=session.id).all()
+                for message in messages:
+                    db.session.delete(message)
+                db.session.delete(session)
         db.session.commit()
         return '', 204
     except Exception as e:
-        logger.exception("Error during delete_sessions")
         db.session.rollback()
+        logger.exception("Error during delete_sessions")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/update_session_name', methods=['POST'])
@@ -159,6 +231,23 @@ def update_session_name():
         logger.exception("Error during update_session_name")
         db.session.rollback()
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/all_sessions', methods=['GET'])
+def all_sessions():
+    folders = Folder.query.all()
+    folder_data = []
+    for folder in folders:
+        sessions = ChatSession.query.filter_by(folder_id=folder.id, valid=True).all()
+        folder_data.append({
+            'id': folder.id,
+            'name': folder.name,
+            'sessions': [{'id': session.id, 'name': session.name} for session in sessions]
+        })
+    
+    no_folder_sessions = ChatSession.query.filter_by(folder_id=None, valid=True).all()
+    no_folder_data = [{'id': session.id, 'name': session.name} for session in no_folder_sessions]
+    
+    return jsonify({'folders': folder_data, 'no_folder_sessions': no_folder_data})
 
 def run_ilab_chat(message):
     try:
