@@ -8,7 +8,11 @@ This tool offers a user-friendly interface and retains history in your project f
 
 ## Changing the URLs
 
-Please update the config.py file if your instructlab serve url has changed or you want this server URL or port to be different.
+Please update the config.py file  
+  - if your instructlab serve url has changed, change config.py - EXTERNAL_API_ROOT.
+  - if the UI url is different, change CORS_ORIGINS
+  - Change HOST and PORT as neded. _Note:_ On a mac, AirPlay Receiver may be running on port 5000. If you use port 5000 for this aoi you will likely see CPRS errors in the UI. This api currently runs on port 5001. 
+
 ## One-time
 
 ### Mac and Linux
@@ -25,7 +29,17 @@ venv\Scripts\activate
 pip install -r .\requirements.txt
 ```
 ## Run the server
+
+### Mac and Linux
 ```
 python3 app.py
 ```
+
+### Windows 
+
+```
+python app.py
+```
+Note: This is not tested on Windows.
+
 After launching the server, run the UI in the chat-ui project.

@@ -12,8 +12,8 @@ EXTERNAL_API_ENDPOINT = f'{EXTERNAL_API_ROOT}/v1/chat/completions'
 
 # Flask app configuration
 HOST = '127.0.0.1'
-PORT = 5000
+PORT = 5001
 
 # CORS configuration
-CORS_ORIGINS = ["http://localhost:3000"]
+CORS_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000", "*"]
 CORS_HEADERS = ['Content-Type', 'Authorization']

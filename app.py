@@ -14,6 +14,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = config.SQLALCHEMY_TRACK_MODIFICAT
 
 # Allow CORS from React frontend
 CORS(app, resources={r"/*": {"origins": config.CORS_ORIGINS}}, supports_credentials=True)
+app.config['CORS_HEADERS'] = 'Content-Type'
 
 @app.after_request
 def after_request(response):
@@ -256,7 +257,7 @@ def run_ilab_chat(message):
         response = requests.post(
             external_api_url,
             json={
-                'model': 'gpt-3.5-turbo',
+                'model': '',
                 'messages': [
                     {'role': 'system', 'content': 'You are a helpful assistant.'},
                     *messages
